@@ -27,6 +27,7 @@ jobs:
     name: Sync and release
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       # GitHub disables scheduled workflows after 60 days without commits.
       - name: Keep the schedule enabled
