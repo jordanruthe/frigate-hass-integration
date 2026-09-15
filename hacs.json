@@ -1,5 +1,7 @@
 {
     "hacs": "1.6.0",
     "name": "Frigate",
-    "homeassistant": "2026.3.0"
+    "homeassistant": "2026.3.0",
+    "zip_release": true,
+    "filename": "frigate.zip"
 }

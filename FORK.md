@@ -37,13 +37,14 @@ MQTT is unchanged: Home Assistant still needs the same broker as Frigate.
 ## Releases
 
 `.github/workflows/sync-upstream.yml` runs daily, on pushes to `master` and on
-demand:
+demand, using only `GITHUB_TOKEN`:
 
-1. Rebases `master` (upstream release + fork patches) onto the latest upstream
-   release, runs the test suite, and force-pushes `master`. Conflicts open an
-   issue instead.
-2. Publishes `<upstream tag>-mtls.<n>` whenever `master` has changed since the
-   last release, so HACS offers the update.
+1. Finds the latest upstream release and skips if the current `master` commit
+   was already released on top of it.
+2. Cherry-picks the fork commits (those on `master` that upstream does not
+   have) onto that release tag in the runner and runs the test suite. Conflicts
+   open an issue; fix by rebasing `master` onto the tag and pushing.
+3. Publishes `<upstream tag>-mtls.<n>`, tagged at the `master` commit, with the
+   integration as `frigate.zip` (HACS installs it via `zip_release`).
 
-It needs a `RELEASE_TOKEN` repository secret: a fine-grained PAT for this
-repository with Contents, Issues and Workflows read/write.
+Nothing is pushed by CI, so `master` only changes when you push it.

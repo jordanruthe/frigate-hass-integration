@@ -1,11 +1,8 @@
 ---
-# Keeps this fork's client certificate / forward-auth patches on top of the
-# latest upstream release and publishes <upstream tag>-mtls.<n> releases for
-# HACS. Logic lives in .github/scripts/sync-upstream.sh.
-#
-# Needs secret RELEASE_TOKEN: fine-grained PAT for this repository with
-# Contents, Issues and Workflows read/write. The rebase rewrites commits that
-# touch workflow files, which GITHUB_TOKEN is not allowed to push.
+# Builds releases of this fork's client certificate / forward-auth commits on
+# top of the latest upstream release, as <upstream tag>-mtls.<n> with a zip
+# asset for HACS. master is never rewritten, so GITHUB_TOKEN is enough.
+# Logic lives in .github/scripts/sync-upstream.sh.
 name: Sync upstream and release
 
 on:
@@ -19,26 +16,30 @@ on:
 concurrency:
   group: sync-upstream
 
+permissions:
+  actions: write
+  contents: write
+  issues: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     name: Sync and release
     env:
-      GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Check for release token
+      # GitHub disables scheduled workflows after 60 days without commits.
+      - name: Keep the schedule enabled
+        if: github.event_name == 'schedule'
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::RELEASE_TOKEN secret is not set"
-            exit 1
-          fi
+          gh api -X PUT \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/sync-upstream.yml/enable"
 
       - name: Check out the repository
         uses: actions/checkout@v5.0.0
         with:
           ref: master
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Configure git
         run: |
@@ -46,13 +47,16 @@ jobs:
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Rebase onto the latest upstream release
-        id: rebase
-        run: .github/scripts/sync-upstream.sh rebase
-
       - name: Determine release
         id: plan
         run: .github/scripts/sync-upstream.sh plan
+
+      - name: Apply fork commits to the upstream release
+        if: steps.plan.outputs.needed == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+          SOURCE: ${{ steps.plan.outputs.source }}
+        run: .github/scripts/sync-upstream.sh build
 
       - name: Set up Python
         if: steps.plan.outputs.needed == 'true'
@@ -72,15 +76,10 @@ jobs:
           uv pip install -r requirements_dev.txt --system
           pytest -p no:sugar
 
-      - name: Push rebased master
-        if: steps.rebase.outputs.rebased == 'true'
-        env:
-          BEFORE: ${{ steps.rebase.outputs.before }}
-        run: git push --force-with-lease="master:${BEFORE}" origin HEAD:master
-
-      - name: Tag and publish release
+      - name: Publish release
         if: steps.plan.outputs.needed == 'true'
         env:
           TAG: ${{ steps.plan.outputs.tag }}
-          BASE_TAG: ${{ steps.plan.outputs.base_tag }}
+          UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+          SOURCE: ${{ steps.plan.outputs.source }}
         run: .github/scripts/sync-upstream.sh publish
