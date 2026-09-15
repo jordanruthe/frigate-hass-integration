@@ -142,6 +142,11 @@ class FrigateProxyViewMixin:
         result: ProxiedURL = self._get_proxied_url_impl(request, **kwargs)
         if result.ssl_context is not None:
             return result
+        client = self._get_client_for_request(
+            request, kwargs.get("frigate_instance_id")
+        )
+        if client is not None and client.ssl_context is not None:
+            return dataclasses.replace(result, ssl_context=client.ssl_context)
         config_entry = self._get_config_entry_for_request(
             request, kwargs.get("frigate_instance_id")
         )
@@ -181,9 +186,9 @@ class FrigateProxyViewMixin:
             raise HASSWebProxyLibNotFoundRequestError()
         return str(URL(config_entry.data[CONF_URL]) / path)
 
-    async def _get_frigate_auth_for_request(
+    def _get_client_for_request(
         self, request: web.Request, frigate_instance_id: str | None = None
-    ) -> dict[str, str]:
+    ) -> FrigateApiClient | None:
         hass = request.app[KEY_HASS]
         client = None
         if frigate_instance_id:
@@ -194,7 +199,12 @@ class FrigateProxyViewMixin:
             config_entry = self._get_config_entry_for_request(request)
             if config_entry:
                 client = get_client_for_config_entry(hass, config_entry)
+        return client
 
+    async def _get_frigate_auth_for_request(
+        self, request: web.Request, frigate_instance_id: str | None = None
+    ) -> dict[str, str]:
+        client = self._get_client_for_request(request, frigate_instance_id)
         if client is None:
             _LOGGER.warning("No Frigate client found for request '%s'. ", request.url)
             return {}

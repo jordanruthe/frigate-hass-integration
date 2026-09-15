@@ -389,7 +389,9 @@ class FrigateCamera(
 
         headers = await self._client.get_auth_headers()
         async with async_timeout.timeout(10):
-            response = await websession.get(image_url, headers=headers)
+            response = await websession.get(
+                image_url, headers=headers, ssl=self._client.request_ssl
+            )
             return await response.read()
 
     async def stream_source(self) -> str | None:
@@ -581,7 +583,9 @@ class BirdseyeCamera(FrigateEntity, Camera):
 
         headers = await self._client.get_auth_headers()
         async with async_timeout.timeout(10):
-            response = await websession.get(image_url, headers=headers)
+            response = await websession.get(
+                image_url, headers=headers, ssl=self._client.request_ssl
+            )
             return await response.read()
 
     async def stream_source(self) -> str | None:
@@ -602,7 +606,9 @@ class FrigateCameraWebRTC(FrigateCamera):
         url = f"{self._url}/api/go2rtc/webrtc?src={self._cam_name}"
         payload = {"type": "offer", "sdp": offer_sdp}
         headers = await self._client.get_auth_headers()
-        async with websession.post(url, json=payload, headers=headers) as resp:
+        async with websession.post(
+            url, json=payload, headers=headers, ssl=self._client.request_ssl
+        ) as resp:
             answer = await resp.json()
             send_message(WebRTCAnswer(answer["sdp"]))
 
@@ -624,7 +630,9 @@ class BirdseyeCameraWebRTC(BirdseyeCamera):
         url = f"{self._url}/api/go2rtc/webrtc?src={self._cam_name}"
         payload = {"type": "offer", "sdp": offer_sdp}
         headers = await self._client.get_auth_headers()
-        async with websession.post(url, json=payload, headers=headers) as resp:
+        async with websession.post(
+            url, json=payload, headers=headers, ssl=self._client.request_ssl
+        ) as resp:
             answer = await resp.json()
             send_message(WebRTCAnswer(answer["sdp"]))
 

@@ -7,13 +7,20 @@
           "url": "URL",
           "validate_ssl": "Validate SSL",
           "username": "Username (optional)",
-          "password": "Password (optional)"
+          "password": "Password (optional)",
+          "client_certificate": "Client certificate (PEM, optional)",
+          "client_key": "Client private key (PEM, optional)"
+        },
+        "data_description": {
+          "client_certificate": "Presented to a reverse proxy that requires mutual TLS. If the proxy uses forward-auth (e.g. Authentik) with a certificate login flow, the integration completes that login automatically.",
+          "client_key": "Unencrypted private key matching the client certificate."
         }
       }
     },
     "error": {
       "cannot_connect": "Failed to connect",
-      "invalid_url": "Invalid URL"
+      "invalid_url": "Invalid URL",
+      "invalid_client_certificate": "Invalid client certificate or private key"
     },
     "abort": {
       "already_configured": "Device is already configured"
