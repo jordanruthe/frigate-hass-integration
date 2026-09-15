@@ -8,10 +8,14 @@
           "validate_ssl": "Validate SSL",
           "username": "Username (optional)",
           "password": "Password (optional)",
-          "auth_mode": "Authentication mode"
+          "auth_mode": "Authentication mode",
+          "client_certificate": "Client certificate (PEM, optional)",
+          "client_key": "Client private key (PEM, optional)"
         },
         "data_description": {
-          "auth_mode": "'Frigate login' uses Frigate's native username/password login. 'HTTP Basic Auth' sends the username/password as a Basic Authorization header on every request (for reverse proxies enforcing Basic Auth in front of Frigate). 'Bearer token' sends the password as a static Bearer Authorization header on every request (username is ignored); use this for reverse proxies that expect a static token."
+          "auth_mode": "'Frigate login' uses Frigate's native username/password login. 'HTTP Basic Auth' sends the username/password as a Basic Authorization header on every request (for reverse proxies enforcing Basic Auth in front of Frigate). 'Bearer token' sends the password as a static Bearer Authorization header on every request (username is ignored); use this for reverse proxies that expect a static token.",
+          "client_certificate": "Presented to a reverse proxy that requires mutual TLS. If the proxy uses forward-auth (e.g. Authentik) with a certificate login flow, the integration completes that login automatically.",
+          "client_key": "Unencrypted private key matching the client certificate."
         }
       }
     },
@@ -19,7 +23,8 @@
       "cannot_connect": "Failed to connect",
       "invalid_url": "Invalid URL",
       "basic_auth_missing_credentials": "HTTP Basic Auth requires both a username and a password",
-      "bearer_auth_missing_token": "Bearer token authentication requires the token to be entered in the password field"
+      "bearer_auth_missing_token": "Bearer token authentication requires the token to be entered in the password field",
+      "invalid_client_certificate": "Invalid client certificate or private key"
     },
     "abort": {
       "already_configured": "Device is already configured"

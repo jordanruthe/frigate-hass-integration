@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from typing import Any
 
 import voluptuous as vol
@@ -11,9 +12,10 @@ from yarl import URL
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_URL, CONF_USERNAME
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv, selector
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
+from homeassistant.helpers.selector import TextSelector, TextSelectorConfig
 
 from .api import (
     AUTH_MODE_BASIC,
@@ -25,6 +27,8 @@ from .api import (
 )
 from .const import (
     CONF_AUTH_MODE,
+    CONF_CLIENT_CERTIFICATE,
+    CONF_CLIENT_KEY,
     CONF_ENABLE_WEBRTC,
     CONF_MEDIA_BROWSER_ENABLE,
     CONF_NOTIFICATION_PROXY_ENABLE,
@@ -34,6 +38,7 @@ from .const import (
     DEFAULT_HOST,
     DOMAIN,
 )
+from .forward_auth import ClientCertificateError, create_client_ssl_context
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -45,6 +50,25 @@ def get_config_entry_title(url_str: str) -> str:
     # and space is limited on the integrations page.
     url = URL(url_str)
     return str(url)[len(url.scheme + "://") :]
+
+
+async def async_get_client_ssl_context(
+    hass: HomeAssistant, data: dict[str, Any]
+) -> ssl.SSLContext | None:
+    """Build the client certificate SSL context for a config entry, if configured.
+
+    Raises ClientCertificateError if the certificate or key is invalid.
+    """
+    certificate = data.get(CONF_CLIENT_CERTIFICATE)
+    private_key = data.get(CONF_CLIENT_KEY)
+    if not certificate and not private_key:
+        return None
+    return await hass.async_add_executor_job(
+        create_client_ssl_context,
+        certificate or "",
+        private_key or "",
+        data.get(CONF_VALIDATE_SSL, True),
+    )
 
 
 class FrigateFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
@@ -100,6 +124,13 @@ class FrigateFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         try:
+            ssl_context = await async_get_client_ssl_context(self.hass, user_input)
+        except ClientCertificateError:
+            return self._show_config_form(
+                user_input, errors={"base": "invalid_client_certificate"}
+            )
+
+        try:
             session = async_create_clientsession(self.hass)
             client = FrigateApiClient(
                 user_input[CONF_URL],
@@ -108,6 +139,7 @@ class FrigateFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input.get(CONF_PASSWORD),
                 user_input.get(CONF_VALIDATE_SSL, True),
                 user_input.get(CONF_AUTH_MODE, AUTH_MODE_LOGIN),
+                ssl_context,
             )
             await client.async_get_stats()
         except FrigateApiClientError:
@@ -166,6 +198,20 @@ class FrigateFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                             translation_key=CONF_AUTH_MODE,
                         )
                     ),
+                    # No defaults so entries without a certificate keep their data
+                    # unchanged; suggested values pre-fill the reconfigure form.
+                    vol.Optional(
+                        CONF_CLIENT_CERTIFICATE,
+                        description={
+                            "suggested_value": user_input.get(CONF_CLIENT_CERTIFICATE)
+                        },
+                    ): TextSelector(TextSelectorConfig(multiline=True)),
+                    vol.Optional(
+                        CONF_CLIENT_KEY,
+                        description={
+                            "suggested_value": user_input.get(CONF_CLIENT_KEY)
+                        },
+                    ): TextSelector(TextSelectorConfig(multiline=True)),
                 }
             ),
             errors=errors,

@@ -1,0 +1,86 @@
+---
+# Builds releases of this fork's client certificate / forward-auth commits on
+# top of the latest upstream release, as <upstream tag>-mtls.<n> with a zip
+# asset for HACS. master is never rewritten, so GITHUB_TOKEN is enough.
+# Logic lives in .github/scripts/sync-upstream.sh.
+name: Sync upstream and release
+
+on:
+  schedule:
+    - cron: "43 5 * * *"
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    name: Sync and release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # GitHub disables scheduled workflows after 60 days without commits.
+      - name: Keep the schedule enabled
+        if: github.event_name == 'schedule'
+        run: |
+          gh api -X PUT \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/sync-upstream.yml/enable"
+
+      - name: Check out the repository
+        uses: actions/checkout@v5.0.0
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine release
+        id: plan
+        run: .github/scripts/sync-upstream.sh plan
+
+      - name: Apply fork commits to the upstream release
+        if: steps.plan.outputs.needed == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+          SOURCE: ${{ steps.plan.outputs.source }}
+        run: .github/scripts/sync-upstream.sh build
+
+      - name: Set up Python
+        if: steps.plan.outputs.needed == 'true'
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        if: steps.plan.outputs.needed == 'true'
+        uses: astral-sh/setup-uv@v6.4.3
+        with:
+          version: "0.6"
+
+      - name: Run tests
+        if: steps.plan.outputs.needed == 'true'
+        run: |
+          uv pip install -r requirements_dev.txt --system
+          pytest -p no:sugar
+
+      - name: Publish release
+        if: steps.plan.outputs.needed == 'true'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+          SOURCE: ${{ steps.plan.outputs.source }}
+        run: .github/scripts/sync-upstream.sh publish
