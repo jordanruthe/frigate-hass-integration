@@ -6,6 +6,7 @@ import asyncio
 import datetime
 import logging
 import socket
+import ssl
 from typing import Any, cast
 
 import aiohttp
@@ -13,6 +14,12 @@ import async_timeout
 from yarl import URL
 
 from homeassistant.auth import jwt_wrapper
+
+from .forward_auth import (
+    AUTH_REQUIRED_STATUSES,
+    ForwardAuthError,
+    async_forward_auth_login,
+)
 
 TIMEOUT = 10
 REVIEW_SUMMARIZE_TIMEOUT = 60
@@ -32,6 +39,15 @@ class FrigateApiClientError(Exception):
     """General FrigateApiClient error."""
 
 
+class _ForwardAuthRequired(Exception):
+    """The forward-auth proxy requires a (new) login."""
+
+    def __init__(self, stale_cookie: str | None) -> None:
+        """Record the session cookie the rejected request was sent with."""
+        super().__init__()
+        self.stale_cookie = stale_cookie
+
+
 class FrigateApiClient:
     """Frigate API client."""
 
@@ -42,6 +58,7 @@ class FrigateApiClient:
         username: str | None = None,
         password: str | None = None,
         validate_ssl: bool = True,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         """Construct API Client."""
         self._host = host
@@ -50,6 +67,32 @@ class FrigateApiClient:
         self._password = password
         self._token_data: dict[str, Any] = {}
         self.validate_ssl = validate_ssl
+        # A client certificate enables forward-auth handling: requests present
+        # the certificate and carry the session cookie from the SSO login.
+        self.ssl_context = ssl_context
+        self._forward_auth_cookie: str | None = None
+        self._forward_auth_lock = asyncio.Lock()
+
+    @property
+    def request_ssl(self) -> ssl.SSLContext | bool:
+        """Return the `ssl` argument to use for requests to Frigate."""
+        return self.ssl_context if self.ssl_context is not None else self.validate_ssl
+
+    async def _forward_auth_login(self, stale_cookie: str | None) -> None:
+        """Log in through the forward-auth proxy unless another task already did."""
+        assert self.ssl_context is not None
+        async with self._forward_auth_lock:
+            if self._forward_auth_cookie != stale_cookie:
+                return
+            try:
+                self._forward_auth_cookie = await async_forward_auth_login(
+                    self._host, self.ssl_context
+                )
+            except ForwardAuthError as exc:
+                _LOGGER.error("Forward-auth login to %s failed: %s", self._host, exc)
+                raise FrigateApiClientError(
+                    f"Forward-auth login failed: {exc}"
+                ) from exc
 
     async def async_get_version(self) -> str:
         """Get data from the API."""
@@ -456,12 +499,23 @@ class FrigateApiClient:
         if current_time >= self._token_data["expires"]:  # Compare UTC-aware datetimes
             await self._get_token()
 
+    async def _get_forward_auth_headers(self) -> dict[str, str]:
+        """Get the forward-auth session cookie header, logging in if needed."""
+        if self._forward_auth_cookie is None:
+            await self._forward_auth_login(None)
+        return (
+            {"Cookie": self._forward_auth_cookie} if self._forward_auth_cookie else {}
+        )
+
     async def get_auth_headers(self) -> dict[str, str]:
         """
         Get headers for API requests, including the JWT token if available.
         Ensures that the token is refreshed if needed.
         """
         headers = {}
+
+        if self.ssl_context is not None:
+            headers.update(await self._get_forward_auth_headers())
 
         if self._username and self._password:
             await self._refresh_token_if_needed()
@@ -482,26 +536,64 @@ class FrigateApiClient:
         timeout: int | None = None,
     ) -> Any:
         """Get information from the API."""
-        if data is None:
-            data = {}
-        if headers is None:
-            headers = {}
+        args = (method, url, data, headers, decode_json, is_login_request, timeout)
+        try:
+            return await self._api_request(*args)
+        except _ForwardAuthRequired as exc:
+            # The SSO session expired: log in again and retry once.
+            await self._forward_auth_login(exc.stale_cookie)
+        try:
+            return await self._api_request(*args)
+        except _ForwardAuthRequired as exc:
+            raise FrigateApiClientError(
+                "Forward-auth proxy rejected the session after login."
+            ) from exc
+
+    async def _api_request(
+        self,
+        method: str,
+        url: str,
+        data: dict | None,
+        headers: dict | None,
+        decode_json: bool,
+        is_login_request: bool,
+        timeout: int | None,
+    ) -> Any:
+        """Perform a single request against the API."""
+        data = {} if data is None else data
+        headers = {} if headers is None else dict(headers)
+        forward_auth = self.ssl_context is not None
 
         if not is_login_request:
             headers.update(await self.get_auth_headers())
+        elif forward_auth:
+            headers.update(await self._get_forward_auth_headers())
+        sent_cookie = self._forward_auth_cookie
 
         try:
             timeout_value = timeout if timeout is not None else TIMEOUT
             async with async_timeout.timeout(timeout_value):
                 func = getattr(self._session, method)
                 if func:
-                    response = await func(
-                        url,
-                        headers=headers,
-                        raise_for_status=True,
-                        json=data,
-                        ssl=self.validate_ssl,
-                    )
+                    if forward_auth:
+                        response = await func(
+                            url,
+                            headers=headers,
+                            json=data,
+                            ssl=self.request_ssl,
+                            allow_redirects=False,
+                        )
+                        if response.status in AUTH_REQUIRED_STATUSES:
+                            response.release()
+                            raise _ForwardAuthRequired(sent_cookie)
+                    else:
+                        response = await func(
+                            url,
+                            headers=headers,
+                            raise_for_status=True,
+                            json=data,
+                            ssl=self.validate_ssl,
+                        )
                     response.raise_for_status()
                     if is_login_request:
                         return response

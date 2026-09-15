@@ -408,6 +408,8 @@ async def start_frigate_server(
 def create_mock_frigate_client() -> AsyncMock:
     """Create mock frigate client."""
     mock_client = AsyncMock()
+    mock_client.ssl_context = None
+    mock_client.request_ssl = True
     mock_client.async_get_stats = AsyncMock(return_value=TEST_STATS)
     mock_client.async_get_config = AsyncMock(return_value=TEST_CONFIG)
     mock_client.async_get_event_summary = AsyncMock(return_value=TEST_EVENT_SUMMARY)

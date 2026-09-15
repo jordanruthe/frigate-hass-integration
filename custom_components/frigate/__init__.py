@@ -18,7 +18,10 @@ from awesomeversion import AwesomeVersion
 from titlecase import titlecase
 import voluptuous as vol
 
-from custom_components.frigate.config_flow import get_config_entry_title
+from custom_components.frigate.config_flow import (
+    async_get_client_ssl_context,
+    get_config_entry_title,
+)
 from homeassistant.components.mqtt.models import ReceiveMessage
 from homeassistant.components.mqtt.subscription import (
     EntitySubscription,
@@ -42,7 +45,11 @@ from homeassistant.core import (
     callback,
     valid_entity_id,
 )
-from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
+from homeassistant.exceptions import (
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    ServiceValidationError,
+)
 from homeassistant.helpers import device_registry as dr, entity_registry as er, llm
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity import DeviceInfo, Entity
@@ -76,6 +83,7 @@ from .const import (
     STATUS_RUNNING,
     STATUS_STARTING,
 )
+from .forward_auth import ClientCertificateError
 from .llm_functions import FrigateServiceAPI
 from .views import async_setup as views_async_setup
 from .ws_api import async_setup as ws_api_async_setup
@@ -338,12 +346,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up this integration using UI."""
+    try:
+        ssl_context = await async_get_client_ssl_context(hass, dict(entry.data))
+    except ClientCertificateError as exc:
+        raise ConfigEntryError(f"Invalid client certificate: {exc}") from exc
+
     client = FrigateApiClient(
         str(entry.data.get(CONF_URL)),
         async_get_clientsession(hass),
         entry.data.get(CONF_USERNAME),
         entry.data.get(CONF_PASSWORD),
         entry.data.get(CONF_VALIDATE_SSL, True),
+        ssl_context,
     )
     coordinator = FrigateDataUpdateCoordinator(hass, client=client)
     await coordinator.async_config_entry_first_refresh()

@@ -53,6 +53,8 @@ ATTR_NAME = "name"
 
 # Configuration and options
 CONF_VALIDATE_SSL = "validate_ssl"
+CONF_CLIENT_CERTIFICATE = "client_certificate"
+CONF_CLIENT_KEY = "client_key"
 CONF_MEDIA_BROWSER_ENABLE = "media_browser_enable"
 CONF_NOTIFICATION_PROXY_ENABLE = "notification_proxy_enable"
 CONF_NOTIFICATION_PROXY_EXPIRE_AFTER_SECONDS = "notification_proxy_expire_after_seconds"
