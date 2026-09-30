@@ -18,7 +18,12 @@ from cryptography.x509.oid import NameOID
 from hass_web_proxy_lib import ProxiedURL, ProxyView
 import pytest
 
-from custom_components.frigate.api import FrigateApiClient, FrigateApiClientError
+from custom_components.frigate.api import (
+    FORWARD_AUTH_RETRY_DELAY,
+    FrigateApiClient,
+    FrigateApiClientError,
+)
+from custom_components.frigate.client_session import async_get_frigate_clientsession
 from custom_components.frigate.config_flow import async_get_client_ssl_context
 from custom_components.frigate.const import (
     CONF_CLIENT_CERTIFICATE,
@@ -106,7 +111,10 @@ class FakeAuthentik:
         """Frigate API endpoint behind forward-auth."""
         self.api_cookies.append(request.headers.get("Cookie"))
         if not self._authorized(request):
-            return web.HTTPFound("/application/o/authorize/?client_id=frigate")
+            # Like the Authentik outpost, start a new (unauthenticated) session.
+            response = web.HTTPFound("/application/o/authorize/?client_id=frigate")
+            response.set_cookie(SESSION_COOKIE, "unauthenticated")
+            return response
         return web.Response(text="0.16.0")
 
     async def authorize(self, request: web.Request) -> web.Response:
@@ -229,6 +237,34 @@ async def test_login_does_not_complete(
         await async_forward_auth_login(str(server.make_url("/")), ssl_context)
 
 
+async def test_login_service_unavailable(
+    aiohttp_server: Any, ssl_context: ssl.SSLContext
+) -> None:
+    """Test a login ending at an unavailable server."""
+    server = await start_frigate_server(
+        aiohttp_server,
+        [web.get("/api/version", lambda _: web.Response(status=503))],
+    )
+    with pytest.raises(ForwardAuthError, match="unavailable \\(status 503\\)"):
+        await async_forward_auth_login(str(server.make_url("/")), ssl_context)
+
+
+async def test_login_flow_executor_error(
+    aiohttp_server: Any, ssl_context: ssl.SSLContext
+) -> None:
+    """Test the flow executor API returning an error."""
+    server = await start_frigate_server(
+        aiohttp_server,
+        [
+            web.get("/api/version", lambda _: web.HTTPFound("/if/flow/a/")),
+            web.get("/if/flow/a/", lambda _: web.Response(text="a")),
+            web.get("/api/v3/flows/executor/a/", lambda _: web.Response(status=503)),
+        ],
+    )
+    with pytest.raises(ForwardAuthError, match="returned status 503"):
+        await async_forward_auth_login(str(server.make_url("/")), ssl_context)
+
+
 async def test_login_connection_error(ssl_context: ssl.SSLContext) -> None:
     """Test a login request failing."""
     with patch(
@@ -243,7 +279,8 @@ async def test_client_ssl_property(
     """Test the ssl argument used for requests."""
     assert FrigateApiClient(TEST_URL, aiohttp_session).request_ssl is True
     assert (
-        FrigateApiClient(TEST_URL, aiohttp_session, validate_ssl=False).request_ssl is False
+        FrigateApiClient(TEST_URL, aiohttp_session, validate_ssl=False).request_ssl
+        is False
     )
     client = FrigateApiClient(TEST_URL, aiohttp_session, ssl_context=ssl_context)
     assert client.request_ssl is ssl_context
@@ -304,6 +341,106 @@ async def test_client_login_failure(
         AsyncMock(side_effect=ForwardAuthError("nope")),
     ), pytest.raises(FrigateApiClientError, match="nope"):
         await client.get_auth_headers()
+
+
+async def test_client_login_failure_backs_off(
+    aiohttp_session: aiohttp.ClientSession, ssl_context: ssl.SSLContext
+) -> None:
+    """Test a failed login is not retried until the retry delay has passed."""
+    client = FrigateApiClient(TEST_URL, aiohttp_session, ssl_context=ssl_context)
+    with patch(
+        "custom_components.frigate.api.async_forward_auth_login",
+        AsyncMock(side_effect=[ForwardAuthError("nope"), "cookie=1"]),
+    ) as login, patch(
+        "custom_components.frigate.api.time.monotonic", return_value=1000.0
+    ) as monotonic:
+        with pytest.raises(FrigateApiClientError, match="nope"):
+            await client.get_auth_headers()
+        with pytest.raises(FrigateApiClientError, match="recently"):
+            await client.get_auth_headers()
+        assert login.call_count == 1
+
+        monotonic.return_value = 1000.0 + FORWARD_AUTH_RETRY_DELAY
+        assert await client.get_auth_headers() == {"Cookie": "cookie=1"}
+        assert login.call_count == 2
+
+
+async def test_client_request_relogs_on_expiry(
+    hass: HomeAssistant, aiohttp_server: Any, ssl_context: ssl.SSLContext
+) -> None:
+    """Test raw requests renew an expired session instead of following the login.
+
+    Regression test: the proxy sets a new unauthenticated session cookie when it
+    redirects to login. A session keeping that cookie in its jar would send it
+    instead of the cookie from the next login, so every login was wasted.
+    """
+    authentik = FakeAuthentik()
+    server = await start_frigate_server(aiohttp_server, authentik.routes())
+    session = async_get_frigate_clientsession(hass)
+    assert session is async_get_frigate_clientsession(hass)
+    client = FrigateApiClient(
+        str(server.make_url("/")), session, ssl_context=ssl_context
+    )
+    url = str(server.make_url("/api/version"))
+
+    async with await client.async_request("get", url) as response:
+        assert await response.text() == "0.16.0"
+    assert authentik.logins == 1
+
+    # The proxy session expires: log in again and retry once.
+    authentik.valid_session = "session-2"
+    async with await client.async_request("get", url) as response:
+        assert await response.text() == "0.16.0"
+    assert authentik.logins == 2
+    assert f"{SESSION_COOKIE}=session-2" in authentik.api_cookies[-1]
+    assert await client.async_get_version() == "0.16.0"
+    assert authentik.logins == 2
+
+
+async def test_client_request_rejected_after_login(
+    aiohttp_session: aiohttp.ClientSession,
+    aiohttp_server: Any,
+    ssl_context: ssl.SSLContext,
+) -> None:
+    """Test a raw request that is still rejected after a fresh login."""
+    server = await start_frigate_server(
+        aiohttp_server,
+        [web.get("/api/version", lambda _: web.Response(status=401))],
+    )
+    client = FrigateApiClient(
+        str(server.make_url("/")), aiohttp_session, ssl_context=ssl_context
+    )
+    with patch(
+        "custom_components.frigate.api.async_forward_auth_login",
+        AsyncMock(side_effect=["cookie=1", "cookie=2"]),
+    ) as login:
+        with pytest.raises(FrigateApiClientError, match="rejected"):
+            await client.async_request("get", str(server.make_url("/api/version")))
+        # The next request does not immediately log in again.
+        with pytest.raises(FrigateApiClientError, match="recently"):
+            await client.async_get_version()
+    assert login.call_count == 2
+
+
+async def test_client_request_without_forward_auth(
+    aiohttp_session: aiohttp.ClientSession, aiohttp_server: Any
+) -> None:
+    """Test raw requests without forward-auth follow redirects as before."""
+    handler = AsyncMock(return_value=web.Response(text="ok"))
+    server = await start_frigate_server(
+        aiohttp_server,
+        [
+            web.get("/old", lambda _: web.HTTPFound("/new")),
+            web.post("/new", handler),
+            web.get("/new", handler),
+        ],
+    )
+    client = FrigateApiClient(str(server.make_url("/")), aiohttp_session)
+    async with await client.async_request(
+        "get", str(server.make_url("/old")), headers={"X-Test": "1"}
+    ) as response:
+        assert await response.text() == "ok"
+    assert handler.call_args[0][0].headers["X-Test"] == "1"
 
 
 async def test_client_concurrent_login_is_shared(

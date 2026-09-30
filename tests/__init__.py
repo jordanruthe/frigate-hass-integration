@@ -12,10 +12,11 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from custom_components.frigate.client_session import async_get_frigate_clientsession
 from custom_components.frigate.const import CONF_VALIDATE_SSL, DOMAIN
 from homeassistant.config_entries import RELOAD_AFTER_UPDATE_DELAY, ConfigEntry
 from homeassistant.const import CONF_URL
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, async_get_hass
 from homeassistant.helpers import entity_registry as er
 import homeassistant.util.dt as dt_util
 
@@ -410,6 +411,12 @@ def create_mock_frigate_client() -> AsyncMock:
     mock_client = AsyncMock()
     mock_client.ssl_context = None
     mock_client.request_ssl = True
+
+    async def _request(method: str, url: str, **kwargs: Any) -> Any:
+        session = async_get_frigate_clientsession(async_get_hass())
+        return await session.request(method, url, **kwargs)
+
+    mock_client.async_request = AsyncMock(side_effect=_request)
     mock_client.async_get_stats = AsyncMock(return_value=TEST_STATS)
     mock_client.async_get_config = AsyncMock(return_value=TEST_CONFIG)
     mock_client.async_get_event_summary = AsyncMock(return_value=TEST_EVENT_SUMMARY)

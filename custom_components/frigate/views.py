@@ -22,6 +22,7 @@ import jwt
 from yarl import URL
 
 from custom_components.frigate.api import FrigateApiClient
+from custom_components.frigate.client_session import async_get_frigate_clientsession
 from custom_components.frigate.const import (
     ATTR_CLIENT,
     ATTR_CLIENT_ID,
@@ -38,7 +39,6 @@ from homeassistant.components.http.const import KEY_HASS
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_URL
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util.ssl import get_default_no_verify_context
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -119,7 +119,7 @@ def get_frigate_instance_id_for_config_entry(
 
 def async_setup(hass: HomeAssistant) -> None:
     """Set up the views."""
-    session = async_get_clientsession(hass)
+    session = async_get_frigate_clientsession(hass)
     hass.http.register_view(JSMPEGProxyView(session))
     hass.http.register_view(MSEProxyView(session))
     hass.http.register_view(WebRTCProxyView(session))

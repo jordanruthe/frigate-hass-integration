@@ -51,7 +51,6 @@ from homeassistant.exceptions import (
     ServiceValidationError,
 )
 from homeassistant.helpers import device_registry as dr, entity_registry as er, llm
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity import DeviceInfo, Entity
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -59,6 +58,7 @@ from homeassistant.loader import async_get_integration
 from homeassistant.util import slugify
 
 from .api import FrigateApiClient, FrigateApiClientError
+from .client_session import async_get_frigate_clientsession
 from .const import (
     ATTR_CLIENT,
     ATTR_CONFIG,
@@ -353,7 +353,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     client = FrigateApiClient(
         str(entry.data.get(CONF_URL)),
-        async_get_clientsession(hass),
+        async_get_frigate_clientsession(hass),
         entry.data.get(CONF_USERNAME),
         entry.data.get(CONF_PASSWORD),
         entry.data.get(CONF_VALIDATE_SSL, True),

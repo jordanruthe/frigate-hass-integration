@@ -7,6 +7,7 @@ import datetime
 import logging
 import socket
 import ssl
+import time
 from typing import Any, cast
 
 import aiohttp
@@ -23,6 +24,10 @@ from .forward_auth import (
 
 TIMEOUT = 10
 REVIEW_SUMMARIZE_TIMEOUT = 60
+
+# Seconds to wait after a failed or rejected forward-auth login before trying
+# again, so that polling and camera refreshes do not hammer the SSO provider.
+FORWARD_AUTH_RETRY_DELAY = 30
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -72,6 +77,7 @@ class FrigateApiClient:
         self.ssl_context = ssl_context
         self._forward_auth_cookie: str | None = None
         self._forward_auth_lock = asyncio.Lock()
+        self._forward_auth_retry_at: float | None = None
 
     @property
     def request_ssl(self) -> ssl.SSLContext | bool:
@@ -84,15 +90,68 @@ class FrigateApiClient:
         async with self._forward_auth_lock:
             if self._forward_auth_cookie != stale_cookie:
                 return
+            if (
+                self._forward_auth_retry_at is not None
+                and time.monotonic() < self._forward_auth_retry_at
+            ):
+                raise FrigateApiClientError(
+                    "Forward-auth login failed recently; waiting before retrying."
+                )
             try:
                 self._forward_auth_cookie = await async_forward_auth_login(
                     self._host, self.ssl_context
                 )
             except ForwardAuthError as exc:
+                self._forward_auth_retry_at = (
+                    time.monotonic() + FORWARD_AUTH_RETRY_DELAY
+                )
                 _LOGGER.error("Forward-auth login to %s failed: %s", self._host, exc)
                 raise FrigateApiClientError(
                     f"Forward-auth login failed: {exc}"
                 ) from exc
+            self._forward_auth_retry_at = None
+
+    def _forward_auth_rejected(self) -> FrigateApiClientError:
+        """Handle the proxy rejecting the session from a fresh login."""
+        self._forward_auth_retry_at = time.monotonic() + FORWARD_AUTH_RETRY_DELAY
+        _LOGGER.warning(
+            "Forward-auth proxy in front of %s rejected the session right after "
+            "login; check that the login cookie is valid for this host",
+            self._host,
+        )
+        return FrigateApiClientError(
+            "Forward-auth proxy rejected the session after login."
+        )
+
+    async def async_request(
+        self, method: str, url: str, **kwargs: Any
+    ) -> aiohttp.ClientResponse:
+        """Send a raw request to Frigate with authentication.
+
+        With forward-auth, an expired proxy session is renewed and the request
+        retried once instead of following the redirect to the login page.
+        """
+        forward_auth = self.ssl_context is not None
+        extra_headers = kwargs.pop("headers", {})
+        retried = False
+        while True:
+            headers = {**extra_headers, **await self.get_auth_headers()}
+            sent_cookie = self._forward_auth_cookie
+            response = await self._session.request(
+                method,
+                url,
+                headers=headers,
+                ssl=self.request_ssl,
+                allow_redirects=not forward_auth,
+                **kwargs,
+            )
+            if not forward_auth or response.status not in AUTH_REQUIRED_STATUSES:
+                return response
+            response.release()
+            if retried:
+                raise self._forward_auth_rejected()
+            await self._forward_auth_login(sent_cookie)
+            retried = True
 
     async def async_get_version(self) -> str:
         """Get data from the API."""
@@ -545,9 +604,7 @@ class FrigateApiClient:
         try:
             return await self._api_request(*args)
         except _ForwardAuthRequired as exc:
-            raise FrigateApiClientError(
-                "Forward-auth proxy rejected the session after login."
-            ) from exc
+            raise self._forward_auth_rejected() from exc
 
     async def _api_request(
         self,
