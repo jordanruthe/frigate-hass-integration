@@ -129,6 +129,10 @@ async def async_forward_auth_login(host: str, ssl_context: ssl.SSLContext) -> st
                     current_url = response.url
                     status = response.status
 
+            if status >= 500:
+                raise ForwardAuthError(
+                    f"{current_url.origin()} is unavailable (status {status})"
+                )
             if (
                 not _same_origin(current_url, target)
                 or status in AUTH_REQUIRED_STATUSES
@@ -140,6 +144,10 @@ async def async_forward_auth_login(host: str, ssl_context: ssl.SSLContext) -> st
                 )
 
             cookies: SimpleCookie = session.cookie_jar.filter_cookies(target)
+    except aiohttp.ClientResponseError as exc:
+        raise ForwardAuthError(
+            f"{exc.request_info.real_url.origin()} returned status {exc.status}"
+        ) from exc
     except (aiohttp.ClientError, TimeoutError, KeyError, ValueError) as exc:
         raise ForwardAuthError(f"login request failed: {exc!r}") from exc
 
